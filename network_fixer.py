@@ -1,612 +1,201 @@
-
 import os
 import sys
 import time
 import socket
 import subprocess
 import ctypes
-import shlex
 from datetime import datetime
 
-
-# ============================================================
-# ADMINISTRATOR PRIVILEGES
-# ============================================================
-
 def is_admin():
-    """Check whether the script has administrator privileges."""
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
     except Exception:
         return False
 
-
 def force_admin_elevation():
-    """Restart the script with Windows administrator privileges."""
     try:
         script_path = os.path.abspath(sys.argv[0])
-
-        # Properly quote arguments, including paths containing spaces.
-        params = subprocess.list2cmdline(
-            [script_path] + sys.argv[1:]
-        )
-
-        result = ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            sys.executable,
-            params,
-            os.path.dirname(script_path),
-            1
-        )
-
+        params = subprocess.list2cmdline([script_path] + sys.argv[1:])
+        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, os.path.dirname(script_path), 1)
         if result <= 32:
             print("[-] Administrator elevation failed.")
-            print("[-] Please run this program as Administrator.")
-            input("Press Enter to exit...")
             sys.exit(1)
-
         sys.exit(0)
-
     except Exception as e:
         print(f"[-] Elevation error: {e}")
-        input("Press Enter to exit...")
         sys.exit(1)
 
-
-# ============================================================
-# LOGGING SYSTEM
-# ============================================================
-
 def log_message(text):
-    """Display messages and save them to daily log files."""
-
-    timestamp_full = datetime.now().strftime(
-        "[%Y-%m-%d %H:%M:%S]"
-    )
-
+    timestamp_full = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
     log_line = f"{timestamp_full} {text}"
     print(log_line, flush=True)
-
     try:
         if getattr(sys, "frozen", False):
-            base_dir = os.path.dirname(
-                os.path.abspath(sys.executable)
-            )
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
         else:
-            base_dir = os.path.dirname(
-                os.path.abspath(__file__)
-            )
-
+            base_dir = os.path.dirname(os.path.abspath(__file__))
         log_dir = os.path.join(base_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
-
         date_str = datetime.now().strftime("%Y-%m-%d")
-
-        log_file_path = os.path.join(
-            log_dir,
-            f"network_log_{date_str}.txt"
-        )
-
-        with open(
-            log_file_path,
-            "a",
-            encoding="utf-8"
-        ) as f:
+        log_file_path = os.path.join(log_dir, f"network_log_{date_str}.txt")
+        with open(log_file_path, "a", encoding="utf-8") as f:
             f.write(log_line + "\n")
-
     except Exception as e:
         print(f"[-] Logging failed: {e}")
 
-
-# ============================================================
-# INTERNET CONNECTIVITY CHECK
-# ============================================================
-
-def check_internet(
-    host="8.8.8.8",
-    port=53,
-    timeout=3
-):
-    """Check internet connectivity using a TCP connection."""
-
+def check_internet(host="8.8.8.8", port=53, timeout=3):
     try:
-        with socket.create_connection(
-            (host, port),
-            timeout=timeout
-        ):
+        with socket.create_connection((host, port), timeout=timeout):
             return True
-
     except OSError:
         return False
 
-
-# ============================================================
-# RTL8188FTV HARDWARE DETECTION
-# ============================================================
-
-def check_rtl8188ftv_hardware():
-    """Check for RTL8188FTV wireless adapter using Windows WMI."""
-
+def get_hardware_descriptions():
+    hardware_map = {}
     try:
-        cmd = (
-            'wmic path win32_pnpsigneddriver '
-            'where "DeviceName like \'%RTL8188FTV%\'" '
-            'get DeviceName /format:list'
-        )
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            shell=True,
-            timeout=15
-        )
-
-        if "RTL8188FTV" in result.stdout.upper():
-            return (
-                "[FOUND] RTL8188FTV Wireless LAN "
-                "adapter is installed on this system."
-            )
-
-        return (
-            "[NOT FOUND] RTL8188FTV Wireless LAN "
-            "adapter was not detected."
-        )
-
+        cmd = 'wmic path win32_pnpsigneddriver where "DeviceClass=\'NET\'" get DeviceName, FriendlyName /format:list'
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=True, timeout=15)
+        current_name = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("DeviceName="):
+                parts = line.split("=", 1)
+                if len(parts) > 1:
+                    current_name = parts[1]
+            elif line.startswith("FriendlyName=") and current_name:
+                parts = line.split("=", 1)
+                if len(parts) > 1:
+                    friendly = parts[1]
+                    clean_key = friendly.split(" - ")[0].strip()
+                    hardware_map[clean_key] = current_name
+                    current_name = None
     except Exception:
-        return (
-            "[UNKNOWN] Could not verify RTL8188FTV "
-            "hardware status."
-        )
-
-
-# ============================================================
-# NETWORK ADAPTER PROFILING
-# ============================================================
+        pass
+    return hardware_map
 
 def get_profiled_adapters():
-    """Categorize Windows network interfaces."""
-
     wifi_adapters = []
     lan_adapters = []
     other_adapters = []
-
+    hw_descriptions = get_hardware_descriptions()
     try:
-        result = subprocess.run(
-            [
-                "netsh",
-                "interface",
-                "show",
-                "interface"
-            ],
-            capture_output=True,
-            text=True,
-            shell=False,
-            timeout=15
-        )
-
-        lines = result.stdout.splitlines()
-
-        for line in lines:
-
-            if (
-                "Connected" in line
-                or "Disconnected" in line
-                or "Enabled" in line
-                or "Disabled" in line
-            ):
-
+        result = subprocess.run(["netsh", "interface", "show", "interface"], capture_output=True, text=True, shell=False, timeout=15)
+        for line in result.stdout.splitlines():
+            if "Connected" in line or "Disconnected" in line or "Enabled" in line or "Disabled" in line:
                 parts = line.split()
-
                 if len(parts) >= 4:
-
                     status = parts[0]
                     name = " ".join(parts[3:])
-
                     lower_name = name.lower()
-
-                    entry = (
-                        f"'{name}' (Status: {status})"
-                    )
-
-                    if (
-                        "wi-fi" in lower_name
-                        or "wifi" in lower_name
-                        or "wireless" in lower_name
-                        or "wlan" in lower_name
-                    ):
-
+                    hardware_model = "Unknown Device"
+                    for key, val in hw_descriptions.items():
+                        if name in key or key in name or name.lower() in val.lower():
+                            hardware_model = val
+                            break
+                    if hardware_model == "Unknown Device" and len(hw_descriptions) > 0:
+                        if "wi-fi" in lower_name or "wifi" in lower_name:
+                            matched = [v for k, v in hw_descriptions.items() if "wireless" in v.lower() or "wi-fi" in v.lower() or "802.11" in v.lower()]
+                            if matched: hardware_model = matched[0]
+                        elif "ethernet" in lower_name:
+                            matched = [v for k, v in hw_descriptions.items() if "ethernet" in v.lower() or "gigabit" in v.lower() or "pcie" in v.lower()]
+                            if matched: hardware_model = matched[0]
+                    entry = f"'{name}' [Hardware: {hardware_model}] (Status: {status})"
+                    if "wi-fi" in lower_name or "wifi" in lower_name or "wireless" in lower_name or "wlan" in lower_name:
                         wifi_adapters.append(entry)
-
-                    elif (
-                        "ethernet" in lower_name
-                        or "lan" in lower_name
-                    ):
-
+                    elif "ethernet" in lower_name or "lan" in lower_name:
                         lan_adapters.append(entry)
-
                     else:
                         other_adapters.append(entry)
-
     except Exception as e:
-        log_message(
-            f"[-] Adapter profiling error: {e}"
-        )
-
-    return (
-        wifi_adapters,
-        lan_adapters,
-        other_adapters
-    )
-
-
-# ============================================================
-# HARDWARE PROFILE DISPLAY
-# ============================================================
+        log_message(f"[-] Adapter profiling error: {e}")
+    return wifi_adapters, lan_adapters, other_adapters
 
 def display_hardware_profile():
-
-    log_message(
-        "=== SYSTEM HARDWARE PROFILING ==="
-    )
-
-    rtl_status = check_rtl8188ftv_hardware()
-
-    log_message(
-        f"[CHIPSET] {rtl_status}"
-    )
-
+    log_message("=== SYSTEM HARDWARE PROFILING ===")
     wifi, lan, other = get_profiled_adapters()
-
-    log_message(
-        "[ADAPTER CATEGORIES]"
-    )
-
-    # Wi-Fi adapters
+    log_message("[DETECTED ADAPTER CATEGORIES]")
     if wifi:
-
-        for w in wifi:
-            log_message(
-                f"   -> [Wi-Fi] {w}"
-            )
-
+        for w in wifi: log_message(f"   -> [Wi-Fi] {w}")
     else:
-
-        log_message(
-            "   -> [Wi-Fi] "
-            "No active wireless interfaces mapped."
-        )
-
-    # LAN / Ethernet adapters
+        log_message("   -> [Wi-Fi] No active wireless hardware mapped.")
     if lan:
-
-        for l in lan:
-            log_message(
-                f"   -> [LAN/Ethernet] {l}"
-            )
-
+        for l in lan: log_message(f"   -> [LAN/Ethernet] {l}")
     else:
-
-        log_message(
-            "   -> [LAN/Ethernet] "
-            "No active wired interfaces mapped."
-        )
-
-    # FIXED: Correct indentation of the OTHER adapter block
+        log_message("   -> [LAN/Ethernet] No active wired hardware mapped.")
     if other:
-
-        for o in other:
-            log_message(
-                f"   -> [OTHER/VIRTUAL] {o}"
-            )
-
+        for o in other: log_message(f"   -> [OTHER/VIRTUAL] {o}")
     else:
-
-        log_message(
-            "   -> [OTHER/VIRTUAL] "
-            "No additional interfaces detected."
-        )
-
-    log_message(
-        "=================================\n"
-    )
-
-
-# ============================================================
-# GET ALL NETWORK INTERFACE NAMES
-# ============================================================
+        log_message("   -> [OTHER/VIRTUAL] No additional interfaces detected.")
+    log_message("=================================\n")
 
 def get_all_interface_names():
-    """Return the names of available network interfaces."""
-
     adapters = []
-
     try:
-
-        result = subprocess.run(
-            [
-                "netsh",
-                "interface",
-                "show",
-                "interface"
-            ],
-            capture_output=True,
-            text=True,
-            shell=False,
-            timeout=15
-        )
-
+        result = subprocess.run(["netsh", "interface", "show", "interface"], capture_output=True, text=True, shell=False, timeout=15)
         for line in result.stdout.splitlines():
-
-            if (
-                "Connected" in line
-                or "Disconnected" in line
-                or "Enabled" in line
-                or "Disabled" in line
-            ):
-
+            if "Connected" in line or "Disconnected" in line or "Enabled" in line or "Disabled" in line:
                 parts = line.split()
-
                 if len(parts) >= 4:
-
-                    adapter_name = " ".join(
-                        parts[3:]
-                    )
-
-                    if adapter_name:
-                        adapters.append(
-                            adapter_name
-                        )
-
+                    adapter_name = " ".join(parts[3:])
+                    if adapter_name: adapters.append(adapter_name)
     except Exception as e:
-
-        log_message(
-            f"[-] Could not retrieve interfaces: {e}"
-        )
-
-    if not adapters:
-
-        return [
-            "Wi-Fi",
-            "Ethernet"
-        ]
-
-    return adapters
-
-
-# ============================================================
-# AUTOMATIC NETWORK REPAIR SEQUENCE
-# ============================================================
+        log_message(f"[-] Could not retrieve interfaces: {e}")
+    return adapters if adapters else ["Wi-Fi", "Ethernet"]
 
 def repair_sequence():
-
-    log_message(
-        "[!] Internet issue detected! "
-        "Launching automatic repairs..."
-    )
-
-    # --------------------------------------------------------
-    # STEP 1: Flush DNS and reset IP configuration
-    # --------------------------------------------------------
-
-    log_message(
-        "[*] Flushing DNS cache and renewing IP configurations..."
-    )
-
+    log_message("[!] Internet issue detected! Launching automatic repairs...")
+    log_message("[*] Flushing DNS cache and renewing IP configurations...")
     commands = [
-
         ["ipconfig", "/flushdns"],
-
         ["ipconfig", "/release"],
-
         ["ipconfig", "/renew"],
-
-        [
-            "netsh",
-            "int",
-            "ip",
-            "reset"
-        ],
-
-        [
-            "netsh",
-            "winsock",
-            "reset"
-        ]
-
+        ["netsh", "int", "ip", "reset"],
+        ["netsh", "winsock", "reset"]
     ]
-
     for command in commands:
-
         try:
-
-            subprocess.run(
-                command,
-                capture_output=True,
-                shell=False,
-                timeout=60
-            )
-
-        except subprocess.TimeoutExpired:
-
-            log_message(
-                f"[-] Command timed out: {command}"
-            )
-
+            subprocess.run(command, capture_output=True, shell=False, timeout=60)
         except Exception as e:
-
-            log_message(
-                f"[-] Command error {command}: {e}"
-            )
-
+            log_message(f"[-] Command error {command}: {e}")
     time.sleep(2)
-
-    # --------------------------------------------------------
-    # STEP 2: Reset network interfaces
-    # --------------------------------------------------------
-
-    log_message(
-        "[*] Resetting hardware interfaces..."
-    )
-
+    log_message("[*] Resetting hardware interfaces...")
     adapters = get_all_interface_names()
-
     for adapter in adapters:
-
-        log_message(
-            f" -> Cycling interface: '{adapter}'"
-        )
-
+        log_message(f" -> Cycling interface: '{adapter}'")
         try:
-
-            subprocess.run(
-                [
-                    "netsh",
-                    "interface",
-                    "set",
-                    "interface",
-                    adapter,
-                    "admin=disabled"
-                ],
-                capture_output=True,
-                shell=False,
-                timeout=30
-            )
-
+            subprocess.run(["netsh", "interface", "set", "interface", adapter, "admin=disabled"], capture_output=True, shell=False, timeout=30)
             time.sleep(3)
-
-            subprocess.run(
-                [
-                    "netsh",
-                    "interface",
-                    "set",
-                    "interface",
-                    adapter,
-                    "admin=enabled"
-                ],
-                capture_output=True,
-                shell=False,
-                timeout=30
-            )
-
+            subprocess.run(["netsh", "interface", "set", "interface", adapter, "admin=enabled"], capture_output=True, shell=False, timeout=30)
             time.sleep(3)
-
         except Exception as e:
-
-            log_message(
-                f"[-] Adapter reset failed "
-                f"for '{adapter}': {e}"
-            )
-
-    # --------------------------------------------------------
-    # STEP 3: Verify internet connectivity
-    # --------------------------------------------------------
-
-    log_message(
-        "[*] Verifying network stability..."
-    )
-
+            log_message(f"[-] Adapter reset failed for '{adapter}': {e}")
+    log_message("[*] Verifying network stability...")
     time.sleep(5)
-
     if check_internet():
-
-        log_message(
-            "[+] Success! Internet connectivity "
-            "has been automatically restored."
-        )
-
+        log_message("[+] Success! Internet connectivity has been automatically restored.")
     else:
-
-        log_message(
-            "[-] Automated repairs failed. "
-            "Running diagnostic check..."
-        )
-
+        log_message("[-] Automated repairs failed. Running diagnostic check...")
         display_hardware_profile()
 
-
-# ============================================================
-# MAIN NETWORK MONITOR
-# ============================================================
-
 def main():
-
-    # --------------------------------------------------------
-    # STEP 1: Administrator verification
-    # --------------------------------------------------------
-
     if not is_admin():
-
-        print(
-            "[*] Insufficient permissions. "
-            "Launching Windows administrative prompt..."
-        )
-
+        print("[*] Insufficient permissions. Launching Windows administrative prompt...")
         force_admin_elevation()
-
-    # --------------------------------------------------------
-    # STEP 2: Initialize monitoring
-    # --------------------------------------------------------
-
-    print(
-        "=================================================="
-    )
-
-    print(
-        "    BACKGROUND NETWORK MONITOR ACTIVATED"
-    )
-
-    print(
-        "    Checking status every 60 seconds..."
-    )
-
-    print(
-        "=================================================="
-    )
-
-    log_message(
-        "[SYSTEM] Monitor initialization complete "
-        "under administrative shell context."
-    )
-
-    # --------------------------------------------------------
-    # STEP 3: Display hardware profile
-    # --------------------------------------------------------
-
+    print("==================================================")
+    print("    BACKGROUND NETWORK MONITOR ACTIVATED")
+    print("    Checking status every 60 seconds...")
+    print("==================================================")
+    log_message("[SYSTEM] Monitor initialization complete under administrative shell context.")
     display_hardware_profile()
-
-    # --------------------------------------------------------
-    # STEP 4: Continuous internet monitoring
-    # --------------------------------------------------------
-
     try:
-
         while True:
-
             if check_internet():
-
-                log_message(
-                    "[OK] Internet connection is stable."
-                )
-
+                log_message("[OK] Internet connection is stable.")
             else:
-
                 repair_sequence()
-
             time.sleep(60)
-
     except KeyboardInterrupt:
-
-        log_message(
-            "[SYSTEM] Background monitor terminated by user."
-        )
-
-
-# ============================================================
-# PROGRAM ENTRY POINT
-# ============================================================
+        log_message("[SYSTEM] Background monitor terminated by user.")
 
 if __name__ == "__main__":
-
     main()
